@@ -1,64 +1,99 @@
 blueprint:
-  name: Human Detection via LLMVision @Fahad0x1
-  description: >
-    Sends a rich notification when a person or human is detected in the camera
-    feed analyzed by LLMVision. 
+  name: Human Detection via { Motion <--> LLMVision}  @fahad 
+  description: |
+    @fahad | Detects motion, analyzes with LLMVision, and sends notification if a human is detected.
   domain: automation
   input:
+    motion_sensor:
+      name: Motion Sensor
+      selector:
+        entity:
+          domain: binary_sensor
+          device_class: motion
+    camera_entity:
+      name: Camera Entity
+      selector:
+        entity:
+          domain: camera
     notify_device:
-      name: Notify Device
-      description: Mobile device to send notification
+      name: Device to Notify
       selector:
         device:
           integration: mobile_app
-    llm_provider_id:
+    provider_id:
       name: LLMVision Provider ID
-      description: Found in your LLMVision config
       default: 01JY23JDQ7AKF4XA6F7FXN3FCZ
       selector:
         text:
+    analysis_duration:
+      name: Analysis Duration (seconds)
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 30
+          unit_of_measurement: seconds
     lovelace_view:
-      name: Lovelace View
-      description: Where notification should open on click
+      name: Click Action URL
       default: /lovelace/0
       selector:
         text:
 
 trigger:
-  - platform: event
-    event_type: llmvision.analysis_result
-
-condition:
-  - condition: template
-    value_template: >
-      {{ trigger.event.data.provider == llm_provider_id and
-         ("person" in trigger.event.data.response_text | lower or
-          "human" in trigger.event.data.response_text | lower) }}
+  - platform: state
+    entity_id: !input motion_sensor
+    to: 'on'
 
 action:
-  - variables:
-      notify_service: >
-        {% set device = device_attr(notify_device, "name") %}
-        {{ "notify.mobile_app_" ~ device | slugify }}
-      image_url: >
-        {{ trigger.event.data.key_frame.replace("/config/www/", "/local/") if trigger.event.data.key_frame else "" }}
-
-  - service: "{{ notify_service }}"
+  - alias: Run LLMVision analysis
+    service: llmvision.stream_analyzer
     data:
-      title: "{{ trigger.event.data.title or 'Human Detected' }}"
-      message: "{{ trigger.event.data.response_text }}"
-      data:
-        image: "{{ image_url }}"
-        tag: "llmvision-alert"
-        group: "llmvision"
-        ttl: 0
-        priority: high
-        channel: "LLMVision Alerts"
-        clickAction: "{{ lovelace_view }}"
-        sticky: true
-        notification_icon: mdi:account
-        color: "#03a9f4"
-        push:
-          interruption-level: active
+      image_entity: ["!input camera_entity"]
+      duration: !input analysis_duration
+      provider: !input provider_id
+      model: gemini-1.5-pro
+      message: >
+        Describe what happens in the camera feed.
+      use_memory: true
+      remember: true
+      expose_images: true
+      generate_title: true
+      include_filename: true
+      max_frames: 3
+      target_width: 1280
+      max_tokens: 50
+      temperature: 0.2
+    response_variable: vision_response
+
+  - alias: Notify if human detected
+    if:
+      - condition: template
+        value_template: >
+          {{ "person" in (vision_response.response_text | lower) or
+             "human" in (vision_response.response_text | lower) }}
+    then:
+      - variables:
+          notify_service: >
+            {% set name = device_attr(notify_device, "name") %}
+            {{ "notify.mobile_app_" ~ name | slugify }}
+          image_url: >
+            {{ vision_response.key_frame.replace("/config/www/", "/local/") if vision_response.key_frame else "" }}
+      - service: "{{ notify_service }}"
+        data:
+          title: "{{ vision_response.title or 'Human Detected' }}"
+          message: "{{ vision_response.response_text }}"
+          data:
+            image: "{{ image_url }}"
+            tag: "llmvision-human"
+            group: "security"
+            clickAction: !input lovelace_view
+            priority: high
+            ttl: 0
+            sticky: true
+            channel: "LLMVision Alerts"
+            notification_icon: mdi:account
+            color: "#03a9f4"
+            push:
+              interruption-level: active
 
 mode: single
